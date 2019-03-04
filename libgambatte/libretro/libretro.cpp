@@ -60,6 +60,10 @@ static gambatte::GB gb2;
 
 bool use_official_bootloader = false;
 
+// Colours from previous frame
+static gambatte::video_pixel_t prev_colours[160 * NUM_GAMEBOYS * 144] = {0};
+static unsigned mix_frames_mode = 0;
+
 bool file_present_in_system(std::string fname)
 {
    const char *systemdirtmp = NULL;
@@ -307,11 +311,65 @@ void retro_set_environment(retro_environment_t cb)
 
    static const struct retro_variable vars[] = {
       { "gambatte_up_down_allowed", "Allow Opposing Directions; disabled|enabled" },
-      { "gambatte_gb_colorization", "GB Colorization; disabled|auto|internal|custom" },
-      { "gambatte_gb_internal_palette", "Internal Palette; GBC - Blue|GBC - Brown|GBC - Dark Blue|GBC - Dark Brown|GBC - Dark Green|GBC - Grayscale|GBC - Green|GBC - Inverted|GBC - Orange|GBC - Pastel Mix|GBC - Red|GBC - Yellow|Special 1|Special 2|Special 3" },
-      { "gambatte_gbc_color_correction", "Color correction; enabled|disabled" },
+      { "gambatte_gb_colorization", "GB Colorization; disabled|auto|GBC|SGB|internal|custom" },
+      { "gambatte_gb_internal_palette", "Internal Palette; \
+GB - DMG|\
+GB - Pocket|\
+GB - Light|\
+GBC - Blue|\
+GBC - Brown|\
+GBC - Dark Blue|\
+GBC - Dark Brown|\
+GBC - Dark Green|\
+GBC - Grayscale|\
+GBC - Green|\
+GBC - Inverted|\
+GBC - Orange|\
+GBC - Pastel Mix|\
+GBC - Red|\
+GBC - Yellow|\
+SGB - 1A|\
+SGB - 1B|\
+SGB - 1C|\
+SGB - 1D|\
+SGB - 1E|\
+SGB - 1F|\
+SGB - 1G|\
+SGB - 1H|\
+SGB - 2A|\
+SGB - 2B|\
+SGB - 2C|\
+SGB - 2D|\
+SGB - 2E|\
+SGB - 2F|\
+SGB - 2G|\
+SGB - 2H|\
+SGB - 3A|\
+SGB - 3B|\
+SGB - 3C|\
+SGB - 3D|\
+SGB - 3E|\
+SGB - 3F|\
+SGB - 3G|\
+SGB - 3H|\
+SGB - 4A|\
+SGB - 4B|\
+SGB - 4C|\
+SGB - 4D|\
+SGB - 4E|\
+SGB - 4F|\
+SGB - 4G|\
+SGB - 4H|\
+Special 1|\
+Special 2|\
+Special 3"
+}, // So many... place on seperate lines for readability...
+      { "gambatte_gbc_color_correction", "Color correction; GBC only|always|disabled" },
+      { "gambatte_gbc_color_correction_mode", "Color correction mode; accurate|fast" },
+      { "gambatte_dark_filter_level", "Dark Filter Level (percent); 0|5|10|15|20|25|30|35|40|45|50" },
       { "gambatte_gb_hwmode", "Emulated hardware (restart); Auto|GB|GBC|GBA" },
       { "gambatte_gb_bootloader", "Use official bootloader (restart); enabled|disabled" },
+      { "gambatte_mix_frames", "Mix frames; disabled|accurate|fast" },
 #ifdef HAVE_NETWORK
       { "gambatte_gb_link_mode", "GameBoy Link Mode; Not Connected|Network Server|Network Client" },
       { "gambatte_gb_link_network_port", "Network Link Port; 56400|56401|56402|56403|56404|56405|56406|56407|56408|56409|56410|56411|56412|56413|56414|56415|56416|56417|56418|56419|56420" },
@@ -370,6 +428,8 @@ void retro_reset()
       memcpy(gb.rtcdata_ptr(), rtc, gb.rtcdata_size());
       delete[] rtc;
    }
+
+   memset(prev_colours, 0, sizeof(gambatte::video_pixel_t) * 160 * NUM_GAMEBOYS * 144);
 }
 
 static size_t serialize_size = 0;
@@ -547,13 +607,34 @@ static void load_custom_palette(void)
 
 static void check_variables(void)
 {
-   bool colorCorrection=true;
+   unsigned colorCorrection = 0;
    struct retro_variable var = {0};
    var.key = "gambatte_gbc_color_correction";
-   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value && !strcmp(var.value, "disabled"))
-      colorCorrection=false;
-   gb.setColorCorrection(colorCorrection);
-
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "GBC only"))
+         colorCorrection = 1;
+      else if (!strcmp(var.value, "always"))
+         colorCorrection = 2;
+   }
+   
+   unsigned colorCorrectionMode = 0;
+   var.key   = "gambatte_gbc_color_correction_mode";
+   var.value = NULL;
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value && !strcmp(var.value, "fast")) {
+      colorCorrectionMode = 1;
+   }
+   gb.setColorCorrectionMode(colorCorrectionMode);
+   
+   unsigned darkFilterLevel = 0;
+   var.key   = "gambatte_dark_filter_level";
+   var.value = NULL;
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      darkFilterLevel = static_cast<unsigned>(atoi(var.value));
+   }
+   gb.setDarkFilterLevel(darkFilterLevel);
+   
    var.key   = "gambatte_up_down_allowed";
    var.value = NULL;
 
@@ -566,6 +647,23 @@ static void check_variables(void)
    }
    else
       up_down_allowed = false;
+
+   unsigned prev_mix_frames_mode = mix_frames_mode;
+   mix_frames_mode = 0;
+   var.key   = "gambatte_mix_frames";
+   var.value = NULL;
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+      if (!strcmp(var.value, "accurate"))
+         mix_frames_mode = 1;
+      else if (!strcmp(var.value, "fast"))
+         mix_frames_mode = 2;
+   }
+   // Must reset previous colours when turning 'mix frames'
+   // on, otherwise first rendered frame may contain garbage
+   if ((prev_mix_frames_mode == 0) && (mix_frames_mode != 0)) {
+      memset(prev_colours, 0, sizeof(gambatte::video_pixel_t) * 160 * NUM_GAMEBOYS * 144);
+   }
 
 #ifdef HAVE_NETWORK
    gb_serialMode = SERIAL_NONE;
@@ -620,11 +718,19 @@ static void check_variables(void)
 
    var.key = "gambatte_gb_colorization";
 
-   if (!environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) || !var.value)
+   if (!environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) || !var.value) {
+      // Should really wait until the end to call setColorCorrection(),
+      // but don't want to have to change the indentation of all the
+      // following code... (makes it too difficult to see the changes in
+      // a git diff...)
+      gb.setColorCorrection(gb.isCgb() && (colorCorrection != 0));
       return;
+   }
    
-   if (gb.isCgb())
+   if (gb.isCgb()) {
+      gb.setColorCorrection(colorCorrection != 0);
       return;
+   }
 
    // else it is a GB-mono game -> set a color palette
    //bool gb_colorization_old = gb_colorization_enable;
@@ -637,41 +743,116 @@ static void check_variables(void)
       gb_colorization_enable = 2;
    else if (strcmp(var.value, "internal") == 0)
       gb_colorization_enable = 3;
+   else if (strcmp(var.value, "GBC") == 0)
+      gb_colorization_enable = 4;
+   else if (strcmp(var.value, "SGB") == 0)
+      gb_colorization_enable = 5;
 
    //std::string internal_game_name = gb.romTitle(); // available only in latest Gambatte
    //std::string internal_game_name = reinterpret_cast<const char *>(info->data + 0x134); // buggy with some games ("YOSSY NO COOKIE", "YOSSY NO PANEPON, etc.)
 
-   // load a GBC BIOS builtin palette
+   // Containers for GBC/SGB BIOS built-in palettes
    unsigned short* gbc_bios_palette = NULL;
+   unsigned short* sgb_bios_palette = NULL;
+   bool isGbcPalette = false;
 
    switch (gb_colorization_enable)
    {
-      case 1:   
-        gbc_bios_palette = const_cast<unsigned short*>(findGbcTitlePal(internal_game_name));
-        if (!gbc_bios_palette)
-        {
-           // no custom palette found, load the default (Dark Green, such as GBC BIOS)
-           gbc_bios_palette = const_cast<unsigned short*>(findGbcDirPal("GBC - Dark Green"));
-        }
-      break;
-        
+      case 1:
+         // Automatic colourisation
+         // Order of preference:
+         // 1 - SGB, if more colourful than GBC
+         // 2 - GBC, if more colourful than SGB
+         // 3 - SGB, if no GBC palette defined
+         // 4 - User-defined internal palette, if neither GBC nor SGB palettes defined
+         //
+         // Load GBC BIOS built-in palette
+         gbc_bios_palette = const_cast<unsigned short*>(findGbcTitlePal(internal_game_name));
+         // Load SGB BIOS built-in palette
+         sgb_bios_palette = const_cast<unsigned short*>(findSgbTitlePal(internal_game_name));
+         // If both GBC and SGB palettes are defined,
+         // use whichever is more colourful
+         if (gbc_bios_palette != 0)
+         {
+            isGbcPalette = true;
+            if (sgb_bios_palette != 0)
+            {
+               if (gbc_bios_palette != p005 &&
+                   gbc_bios_palette != p006 &&
+                   gbc_bios_palette != p007 &&
+                   gbc_bios_palette != p008 &&
+                   gbc_bios_palette != p012 &&
+                   gbc_bios_palette != p013 &&
+                   gbc_bios_palette != p016 &&
+                   gbc_bios_palette != p017 &&
+                   gbc_bios_palette != p01B)
+               {
+                  // Limited color GBC palette -> use SGB equivalent
+                  gbc_bios_palette = sgb_bios_palette;
+                  isGbcPalette = false;
+               }
+            }
+         }
+         // If no GBC palette is defined, use SGB palette
+         if (gbc_bios_palette == 0)
+         {
+            gbc_bios_palette = sgb_bios_palette;
+         }
+         // If neither GBC nor SGB palettes are defined, set
+         // user-defined internal palette
+         if (gbc_bios_palette == 0)
+         {
+            var.key = "gambatte_gb_internal_palette";
+            if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+            {
+               // Load the selected internal palette
+               gbc_bios_palette = const_cast<unsigned short*>(findGbcDirPal(var.value));
+               if (!strncmp("GBC", var.value, 3)) {
+                  isGbcPalette = true;
+               }
+            }
+         }
+         break;
       case 2:
-       load_custom_palette();
-      break;
-     
+         load_custom_palette();
+         break;
       case 3:
-       var.key = "gambatte_gb_internal_palette";
-       if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
-      {
-         // Load the selected internal palette
-         gbc_bios_palette = const_cast<unsigned short*>(findGbcDirPal(var.value));
-      }
-      break;
-
+         var.key = "gambatte_gb_internal_palette";
+         if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+         {
+            // Load the selected internal palette
+            gbc_bios_palette = const_cast<unsigned short*>(findGbcDirPal(var.value));
+            if (!strncmp("GBC", var.value, 3)) {
+               isGbcPalette = true;
+            }
+         }
+         break;
+      case 4:
+         // Force GBC colourisation
+         gbc_bios_palette = const_cast<unsigned short*>(findGbcTitlePal(internal_game_name));
+         if (gbc_bios_palette == 0)
+         {
+            gbc_bios_palette = const_cast<unsigned short*>(findGbcDirPal("GBC - Dark Green")); // GBC Default
+         }
+         isGbcPalette = true;
+         break;
+      case 5:
+         // Force SGB colourisation
+         gbc_bios_palette = const_cast<unsigned short*>(findSgbTitlePal(internal_game_name));
+         if (gbc_bios_palette == 0)
+         {
+            gbc_bios_palette = const_cast<unsigned short*>(findGbcDirPal("SGB - 1A")); // SGB Default
+         }
+         break;
       default:
-       gbc_bios_palette = const_cast<unsigned short*>(findGbcDirPal("GBC - Grayscale"));
-     break;
+         gbc_bios_palette = const_cast<unsigned short*>(findGbcDirPal("GBC - Grayscale"));
+         isGbcPalette = true;
+         break;
    }
+   
+   // Enable colour correction, if required
+   gb.setColorCorrection((colorCorrection == 2) || ((colorCorrection == 1) && isGbcPalette));
+   
    //gambatte is using custom colorization then we have a previously palette loaded, 
    //skip this loop then
    if (gb_colorization_enable != 2)
@@ -782,18 +963,19 @@ bool retro_load_game(const struct retro_game_info *info)
    check_variables();
 
    unsigned sramlen = gb.savedata_size();
-   const uint64_t rom = RETRO_MEMDESC_CONST;
+   const uint64_t rom     = RETRO_MEMDESC_CONST;
+   const uint64_t mainram = RETRO_MEMDESC_SYSTEM_RAM;
 
    struct retro_memory_descriptor descs[] =
    {
-      {   0, gb.zeropage_ptr(), 0, 0xFF80,               0, 0, 0x0080,  NULL },
-      {   0, gb.rambank0_ptr(), 0, 0xC000,               0, 0, 0x1000,  NULL },
-      {   0, gb.rambank1_ptr(), 0, 0xD000,               0, 0, 0x1000,  NULL },
-      {   0, gb.savedata_ptr(), 0, 0xA000, (size_t)~0x1FFF, 0, sramlen, NULL },
-      {   0, gb.vram_ptr(),     0, 0x8000,               0, 0, 0x2000,  NULL },
-      {   0, gb.oamram_ptr(),   0, 0xFE00,               0, 0, 0x00A0,  NULL },
-      { rom, gb.rombank0_ptr(), 0, 0x0000,               0, 0, 0x4000,  NULL },
-      { rom, gb.rombank1_ptr(), 0, 0x4000,               0, 0, 0x4000,  NULL },
+      { mainram, gb.rambank0_ptr(), 0, 0xC000,               0, 0, 0x1000,                        NULL },
+      { mainram, gb.rambank1_ptr(), 0, 0xD000,               0, 0, gb.isCgb() ? 0x7000 : 0x1000,  NULL },
+      { mainram, gb.zeropage_ptr(), 0, 0xFF80,               0, 0, 0x0080,                        NULL },
+      {       0, gb.savedata_ptr(), 0, 0xA000, (size_t)~0x1FFF, 0, sramlen,                       NULL },
+      {       0, gb.vram_ptr(),     0, 0x8000,               0, 0, 0x2000,                        NULL },
+      {       0, gb.oamram_ptr(),   0, 0xFE00,               0, 0, 0x00A0,                        NULL },
+      {     rom, gb.rombank0_ptr(), 0, 0x0000,               0, 0, 0x4000,                        NULL },
+      {     rom, gb.rombank1_ptr(), 0, 0x4000,               0, 0, 0x4000,                        NULL },
    };
    
    struct retro_memory_map mmaps =
@@ -871,6 +1053,107 @@ static void render_audio(const int16_t *samples, unsigned frames)
    blipper_push_samples(resampler_r, samples + 1, frames, 2);
 }
 
+static void mix_frames_fast(void)
+{
+   // Simple frame blending: mixes current frame 50:50 with
+   // previous one.
+   // Uses fast bit twiddling method, suitable for very low
+   // end devices (NB: rounding errors will cause darkening
+   // of colours - this is fairly innocuous, but may annoy
+   // some users)
+   unsigned offset = 0;
+   unsigned colour_index = 0;
+   for (unsigned i = 0; i < 144; i++)
+   {
+      for (unsigned j = 0; j < 160 * NUM_GAMEBOYS; j++)
+      {
+         // Get colours from current frame + previous frame
+         unsigned buff_index = offset + j;
+         gambatte::video_pixel_t rgb = video_buf[buff_index];
+         gambatte::video_pixel_t rgb_prev = prev_colours[colour_index];
+         
+         // Store current colours for next frame
+         prev_colours[colour_index] = rgb;
+         colour_index++;
+         
+         // Mix colours for current frame
+         // Do this in one shot to minimise unnecessary variables...
+         // > Unpack current/previous frame colours and divide by 2
+         // > Mix and repack colours for current frame
+#ifdef VIDEO_RGB565
+         video_buf[buff_index] =   (((rgb >> 11 & 0x1F) >> 1) + ((rgb_prev >> 11 & 0x1F) >> 1)) << 11
+                                 | (((rgb >>  6 & 0x1F) >> 1) + ((rgb_prev >>  6 & 0x1F) >> 1)) << 6
+                                 | (((rgb       & 0x1F) >> 1) + ((rgb_prev       & 0x1F) >> 1));
+#else
+         video_buf[buff_index] =   (((rgb >> 16 & 0x1F) >> 1) + ((rgb_prev >> 16 & 0x1F) >> 1)) << 16
+                                 | (((rgb >>  8 & 0x1F) >> 1) + ((rgb_prev >>  8 & 0x1F) >> 1)) << 8
+                                 | (((rgb       & 0x1F) >> 1) + ((rgb_prev       & 0x1F) >> 1));
+#endif
+      }
+      offset += video_pitch;
+   }
+}
+
+static void mix_frames_accurate(void)
+{
+   // Simple frame blending: mixes current frame 50:50 with
+   // previous one.
+   // Uses slow and accurate floating point conversion
+   // method. Not suitable for very low end devices, but
+   // should leave colour levels intact.
+   // NB: We're repeating some code here, just for performance
+   // reasons (i.e. putting an 'if' statement inside the inner
+   // loop to select between fast and accurate methods makes the
+   // fast method just a tiny bit too slow...)
+   unsigned offset = 0;
+   unsigned colour_index = 0;
+   for (unsigned i = 0; i < 144; i++)
+   {
+      for (unsigned j = 0; j < 160 * NUM_GAMEBOYS; j++)
+      {
+         // Get colours from current frame + previous frame
+         unsigned buff_index = offset + j;
+         gambatte::video_pixel_t rgb = video_buf[buff_index];
+         gambatte::video_pixel_t rgb_prev = prev_colours[colour_index];
+         
+         // Store current colours for next frame
+         prev_colours[colour_index] = rgb;
+         colour_index++;
+         
+         // Unpack current/previous frame colours and convert to float
+#ifdef VIDEO_RGB565
+         float r = static_cast<float>(rgb >> 11 & 0x1F);
+         float g = static_cast<float>(rgb >>  6 & 0x1F);
+         float b = static_cast<float>(rgb       & 0x1F);
+         
+         float r_prev = static_cast<float>(rgb_prev >> 11 & 0x1F);
+         float g_prev = static_cast<float>(rgb_prev >>  6 & 0x1F);
+         float b_prev = static_cast<float>(rgb_prev       & 0x1F);
+#else
+         float r = static_cast<float>(rgb >> 16 & 0x1F);
+         float g = static_cast<float>(rgb >>  8 & 0x1F);
+         float b = static_cast<float>(rgb       & 0x1F);
+         
+         float r_prev = static_cast<float>(rgb_prev >> 16 & 0x1F);
+         float g_prev = static_cast<float>(rgb_prev >>  8 & 0x1F);
+         float b_prev = static_cast<float>(rgb_prev       & 0x1F);
+#endif
+         // Mix colours for current frame and convert back to unsigned
+         unsigned r_mix = static_cast<unsigned>(((r * 0.5) + (r_prev * 0.5)) + 0.5) & 0x1F;
+         unsigned g_mix = static_cast<unsigned>(((g * 0.5) + (g_prev * 0.5)) + 0.5) & 0x1F;
+         unsigned b_mix = static_cast<unsigned>(((b * 0.5) + (b_prev * 0.5)) + 0.5) & 0x1F;
+         
+         // Repack colours for current frame
+#ifdef VIDEO_RGB565
+         video_buf[buff_index] = r_mix << 11 | g_mix << 6 | b_mix;
+#else
+         video_buf[buff_index] = r_mix << 16 | g_mix << 8 | b_mix;
+#endif
+      }
+      offset += video_pitch;
+   }
+}
+
 void retro_run()
 {
    static uint64_t samples_count = 0;
@@ -927,6 +1210,20 @@ void retro_run()
 #else
    render_audio(sound_buf.i16, samples);
 #endif
+
+   switch (mix_frames_mode)
+   {
+      case 1:
+         mix_frames_accurate();
+         break;
+      case 2:
+         mix_frames_fast();
+         break;
+      default:
+         // Do nothing
+         // (defensive coding - could remove this...)
+         break;
+   }
 
 #ifdef VIDEO_RGB565
    video_cb(video_buf, 160*NUM_GAMEBOYS, 144, 512*NUM_GAMEBOYS);

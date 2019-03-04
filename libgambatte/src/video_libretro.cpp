@@ -20,6 +20,7 @@
 #include "savestate.h"
 #include <cstring>
 #include <algorithm>
+#include <cmath>
 
 namespace gambatte
 {
@@ -39,6 +40,22 @@ namespace gambatte
    void LCD::setColorCorrection(bool colorCorrection_)
    {
       colorCorrection = colorCorrection_;
+      refreshPalettes();
+   }
+   
+   void LCD::setColorCorrectionMode(unsigned colorCorrectionMode_)
+   {
+      // Note: We only have two modes, so could make 'colorCorrectionMode'
+      // a bool... but may want to add other modes in the future
+      // (e.g. a special GBA colour correction mode for when the GBA
+      // flag is set in Shantae/Zelda: Oracle/etc.)
+      colorCorrectionMode = colorCorrectionMode_;
+      refreshPalettes();
+   }
+   
+   void LCD::setDarkFilterLevel(unsigned darkFilterLevel_)
+   {
+      darkFilterLevel = darkFilterLevel_;
       refreshPalettes();
    }
 
@@ -115,40 +132,131 @@ namespace gambatte
       }
    }
 
+   // RGB range: [0,1]
+   void LCD::darkenRgb(float &r, float &g, float &b)
+   {
+      // Note: This is *very* approximate...
+      // - Should be done in linear colour space. It isn't.
+      // - Should alter brightness by performing an RGB->HSL->RGB
+      //   conversion. We just do simple linear scaling instead.
+      // Basically, this is intended for use on devices that are
+      // too weak to run shaders (i.e. why would you want a 'dark filter'
+      // if your device supports proper LCD shaders?). We therefore
+      // cut corners for the sake of performance...
+      //
+      // Constants
+      // > Luminosity factors: photometric/digital ITU BT.709
+      static const float lumaR = 0.2126;
+      static const float lumaG = 0.7152;
+      static const float lumaB = 0.0722;
+      // Calculate luminosity
+      float luma = (lumaR * r) + (lumaG * g) + (lumaB * b);
+      // Get 'darkness' scaling factor
+      // > User set 'dark filter' level scaled by current luminosity
+      //   (i.e. lighter colours affected more than darker colours)
+      float darkFactor = 1.0 - ((static_cast<float>(darkFilterLevel) * 0.01) * luma);
+      darkFactor = darkFactor < 0.0 ? 0.0 : darkFactor;
+      // Perform scaling...
+      r = r * darkFactor;
+      g = g * darkFactor;
+      b = b * darkFactor;
+   }
+
    video_pixel_t LCD::gbcToRgb32(const unsigned bgr15)
    {
+      const unsigned r = bgr15       & 0x1F;
+      const unsigned g = bgr15 >>  5 & 0x1F;
+      const unsigned b = bgr15 >> 10 & 0x1F;
+      
+      unsigned rFinal = 0;
+      unsigned gFinal = 0;
+      unsigned bFinal = 0;
+      
+      // Constants
+      // (Don't know whether floating-point rounding modes can be changed
+      // dynamically at run time, so can't rely on constant folding of
+      // inline [float / float] expressions - just play it safe...)
+      static const float rgbMax = 31.0;
+      static const float rgbMaxInv = 1.0 / rgbMax;
+      
+      bool isDark = false;
+      
       if (colorCorrection)
       {
-#ifdef VIDEO_RGB565
-         const unsigned r = bgr15 & 0x1F;
-         const unsigned g = bgr15 >> 5 & 0x1F;
-         const unsigned b = bgr15 >> 10 & 0x1F;
-
-         return (((r * 13 + g * 2 + b + 8) << 7) & 0xF800) | ((g * 3 + b + 1) >> 1) << 5 | ((r * 3 + g * 2 + b * 11 + 8) >> 4);
-#else
-         const unsigned r = bgr15       & 0x1F;
-         const unsigned g = bgr15 >>  5 & 0x1F;
-         const unsigned b = bgr15 >> 10 & 0x1F;
-
-         return ((r * 13 + g * 2 + b) >> 1) << 16 | (g * 3 + b) << 9 | (r * 3 + g * 2 + b * 11) >> 1;
-#endif
+         if (colorCorrectionMode == 1)
+         {
+            // Use fast (inaccurate) Gambatte default method
+            rFinal = ((r * 13) + (g * 2) + b) >> 4;
+            gFinal = ((g * 3) + b) >> 2;
+            bFinal = ((r * 3) + (g * 2) + (b * 11)) >> 4;
+         }
+         else
+         {
+            // Use Pokefan531's "gold standard" GBC colour correction
+            // (https://forums.libretro.com/t/real-gba-and-ds-phat-colors/1540/159)
+            // NB: The results produced by this implementation are ever so slightly
+            // different from the output of the gbc-colour shader. This is due to the
+            // fact that we have to tolerate rounding errors here that are simply not
+            // an issue when tweaking the final image with a post-processing shader.
+            // *However:* the difference is so tiny small that 99.9% of users will
+            // never notice, and the result is still 100x better than the 'fast'
+            // colour correction method.
+            //
+            // Constants
+            static const float targetGamma = 2.2;
+            static const float displayGammaInv = 1.0 / targetGamma;
+            // Perform gamma expansion
+            float rCorrect = std::pow(static_cast<float>(r) * rgbMaxInv, targetGamma);
+            float gCorrect = std::pow(static_cast<float>(g) * rgbMaxInv, targetGamma);
+            float bCorrect = std::pow(static_cast<float>(b) * rgbMaxInv, targetGamma);
+            // Perform colour mangling (lots of magic numbers...)
+            rCorrect = (0.86629 * rCorrect) + (0.13361 * gCorrect);
+            gCorrect = (0.02429 * rCorrect) + (0.70857 * gCorrect) + (0.26714 * bCorrect);
+            bCorrect = (0.11337 * rCorrect) + (0.11448 * gCorrect) + (0.77215 * bCorrect);
+            // Perform gamma compression
+            rCorrect = std::pow(rCorrect, displayGammaInv);
+            gCorrect = std::pow(gCorrect, displayGammaInv);
+            bCorrect = std::pow(bCorrect, displayGammaInv);
+            // Perform image darkening, if required
+            if (darkFilterLevel > 0)
+            {
+               darkenRgb(rCorrect, gCorrect, bCorrect);
+               isDark = true;
+            }
+            // Convert back to 5bit unsigned
+            rFinal = static_cast<unsigned>((rCorrect * rgbMax) + 0.5) & 0x1F;
+            gFinal = static_cast<unsigned>((gCorrect * rgbMax) + 0.5) & 0x1F;
+            bFinal = static_cast<unsigned>((bCorrect * rgbMax) + 0.5) & 0x1F;
+         }
       }
       else
       {
-#ifdef VIDEO_RGB565
-         const unsigned r = bgr15       & 0x1F;
-         const unsigned g = bgr15 >>  5 & 0x1F;
-         const unsigned b = bgr15 >> 10 & 0x1F;
-
-         return r<<11 | g<<6 | b;
-#else
-         const unsigned r = bgr15       & 0x1F;
-         const unsigned g = bgr15 >>  5 & 0x1F;
-         const unsigned b = bgr15 >> 10 & 0x1F;
-
-         return r<<16 | g<<8 | b;
-#endif
+         rFinal = r;
+         gFinal = g;
+         bFinal = b;
       }
+      
+      // Perform image darkening, if required and we haven't
+      // already done it during colour correction
+      if (darkFilterLevel > 0 && !isDark)
+      {
+         // Convert colour range from [0,0x1F] to [0,1]
+         float rDark = static_cast<float>(rFinal) * rgbMaxInv;
+         float gDark = static_cast<float>(gFinal) * rgbMaxInv;
+         float bDark = static_cast<float>(bFinal) * rgbMaxInv;
+         // Perform image darkening
+         darkenRgb(rDark, gDark, bDark);
+         // Convert back to 5bit unsigned
+         rFinal = static_cast<unsigned>((rDark * rgbMax) + 0.5) & 0x1F;
+         gFinal = static_cast<unsigned>((gDark * rgbMax) + 0.5) & 0x1F;
+         bFinal = static_cast<unsigned>((bDark * rgbMax) + 0.5) & 0x1F;
+      }
+      
+#ifdef VIDEO_RGB565
+      return rFinal << 11 | gFinal << 6 | bFinal;
+#else
+      return rFinal << 16 | gFinal << 8 | bFinal;
+#endif
    }
 
 }
